@@ -1,6 +1,17 @@
 import os
 import io
 import pandas as pd
+import plotly.express as px
+import plotly.io as pio
+
+# ======= Paleta institucional =======
+PALETTE = ["#FFFFD9", "#EDF8B1", "#C7E9B4", "#7FCDBB",
+           "#41B6C4", "#1D91C0", "#225EA8", "#0C2C84"]
+
+# Configuración de colores para todos los gráficos Plotly
+px.defaults.template = "plotly_white"
+px.defaults.color_discrete_sequence = PALETTE
+pio.templates.default = "plotly_white"
 import streamlit as st
 from core.pipeline import run_pipeline, PipelineConfig
 
