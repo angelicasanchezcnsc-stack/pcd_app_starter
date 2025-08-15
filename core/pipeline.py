@@ -4,6 +4,9 @@ import os
 import pandas as pd
 import numpy as np
 import plotly.express as px
+import plotly.io as pio
+
+from .report import df_to_xlsx_bytes, make_html_report, fig_to_inline_html, build_simple_pdf
 
 # ========= CONSTANTES MÍNIMAS (de tu notebook v22.0) =========
 COL_OPEC = 'NO. OPEC'
@@ -537,7 +540,7 @@ class PipelineConfig:
     google_api_key: str = ""
     top_n: int = 10
     score_minimo: int = 60
-    generar_pdf: bool = True
+    generar_pdf: bool = False
 
 def _setup_ia(config: PipelineConfig) -> None:
     if config.proveedor_ia == "openai":
@@ -557,6 +560,89 @@ def _setup_ia(config: PipelineConfig) -> None:
             genai.configure(api_key=api_key)
         except Exception as e:
             raise RuntimeError(f"No se pudo inicializar Gemini: {e}")
+
+# ===== HELPERS INTERNOS =====
+def _norm(s): 
+    return "" if pd.isna(s) else str(s).strip().upper()
+
+LEGAL_7 = ["FÍSICA","AUDITIVA","VISUAL","SORDOCEGUERA","INTELECTUAL","PSICOSOCIAL","MÚLTIPLE"]
+MAP_MIN_SALUD = {
+    "FISICA": "FÍSICA", "MOVILIDAD":"FÍSICA", "ENANISMO":"FÍSICA",
+    "AUDITIVA": "AUDITIVA",
+    "VISUAL":"VISUAL",
+    "SORDOCEGUERA":"SORDOCEGUERA",
+    "INTELECTUAL":"INTELECTUAL", "MENTAL COGNITIVO":"INTELECTUAL",
+    "PSICOSOCIAL":"PSICOSOCIAL", "MENTAL PSICOSOCIAL":"PSICOSOCIAL",
+    "MULTIPLE":"MÚLTIPLE", "SISTEMICA":"MÚLTIPLE"
+}
+EQUIV_EDU = {
+    "PRIMARIA": {"BASICA PRIMARIA","PRIMARIA"},
+    "SECUNDARIA": {"BASICA SECUNDARIA","SECUNDARIA","BACHILLER","BACHILLERATO"},
+    "TECNICO": {"TECNICO","TÉCNICO","TECNICO LABORAL","TECNICO PROFESIONAL"},
+    "PROFESIONAL": {"PROFESIONAL","UNIVERSITARIO","PREGRADO"},
+    "ESPECIALIZACION": {"ESPECIALIZACION","ESPECIALISTA","POSTGRADO"},
+}
+
+def calcular_predominancia_territorial(df_minsalud: pd.DataFrame, municipio: str) -> dict:
+    if df_minsalud is None or df_minsalud.empty or not municipio:
+        return {}
+    ms = df_minsalud.copy()
+    ms.columns = [_norm(c) for c in ms.columns]
+    municipio = _norm(municipio)
+    col_cond = "CONDICION" if "CONDICION" in ms.columns else "CONDICIÓN"
+    col_mpio = "MUNICIPIO"
+    col_cnt  = "CANTIDAD_PCD" if "CANTIDAD_PCD" in ms.columns else "CANTIDAD"
+
+    if col_mpio not in ms.columns or col_cond not in ms.columns:
+        return {}
+    sub = ms[ms[col_mpio].apply(_norm) == municipio].copy()
+    if sub.empty:
+        return {}
+    sub["CAT"] = sub[col_cond].apply(lambda x: MAP_MIN_SALUD.get(_norm(x), None))
+    sub = sub[~sub["CAT"].isna()].copy()
+    if col_cnt not in sub.columns:
+        sub[col_cnt] = 1
+    sub[col_cnt] = pd.to_numeric(sub[col_cnt], errors="coerce").fillna(0)
+    por_cat = sub.groupby("CAT")[col_cnt].sum()
+    total = float(por_cat.sum()) or 1.0
+    return (por_cat / total * 100).round(2).to_dict()
+
+def calcular_score_educativo(nivel_requerido: str, df_minsalud: pd.DataFrame, municipio: str) -> float:
+    if df_minsalud is None or df_minsalud.empty:
+        return 0.0
+    ms = df_minsalud.copy()
+    ms.columns = [_norm(c) for c in ms.columns]
+    if "MUNICIPIO" not in ms.columns:
+        return 0.0
+    sub = ms[ms["MUNICIPIO"].apply(_norm) == _norm(municipio)].copy()
+    if sub.empty:
+        return 0.0
+    col_niv = "NIVEL_ESCOLARIDAD" if "NIVEL_ESCOLARIDAD" in ms.columns else None
+    col_cnt = "CANTIDAD_PCD" if "CANTIDAD_PCD" in ms.columns else "CANTIDAD"
+    if not col_niv or col_niv not in sub.columns:
+        return 0.0
+    sub[col_cnt] = pd.to_numeric(sub[col_cnt], errors="coerce").fillna(1)
+
+    req = _norm(nivel_requerido)
+    compatibles = set()
+    for base, grupo in EQUIV_EDU.items():
+        if req in (grupo | {base}):
+            compatibles = grupo | {base}
+            break
+    sub["OK"] = sub[col_niv].apply(lambda x: _norm(x) in compatibles)
+    disp = float(sub.loc[sub["OK"], col_cnt].sum())
+    total = float(sub[col_cnt].sum()) or 1.0
+    return min(1.0, disp / total)
+
+def _score_ia_fallback(texto: str) -> float:
+    t = _norm(texto)
+    if not t:
+        return 0.5
+    n = len(t.split())
+    if n > 1200: return 0.9
+    if n > 600:  return 0.8
+    if n > 200:  return 0.7
+    return 0.6
 
 # ========= PIPELINE PRINCIPAL =========
 def run_pipeline(df1: pd.DataFrame, df2: pd.DataFrame, config: PipelineConfig) -> Dict[str, Any]:
